@@ -463,6 +463,7 @@ func (h *MessagesHandler) handleCodexStreaming(
 	// Read SSE events and transform to Anthropic format
 	var currentEvent string
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024) // 1MB buffer for long lines
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -722,6 +723,7 @@ func (h *MessagesHandler) executeCodexRequest(
 	var events []codex.SSEEvent
 	var currentEvent string
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024) // 1MB buffer for long lines
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
