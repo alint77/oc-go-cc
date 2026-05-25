@@ -309,7 +309,7 @@ func BuildAnthropicChunk(eventType string, data []byte) (chunk []byte, isFinal b
 
 // BuildCompletionResponseFromSSE parses all collected SSE data and builds
 // a complete Anthropic MessageResponse for non-streaming use.
-func BuildCompletionResponseFromSSE(events []SSEEvent, modelID string) ([]byte, error) {
+func BuildCompletionResponseFromSSE(events []SSEEvent, originalModel string) ([]byte, error) {
 	var fullText strings.Builder
 	var toolCalls []map[string]interface{}
 
@@ -363,7 +363,7 @@ func BuildCompletionResponseFromSSE(events []SSEEvent, modelID string) ([]byte, 
 		"type":    "message",
 		"role":    "assistant",
 		"content": contentBlocks,
-		"model":   modelID,
+		"model":   originalModel,
 		"stop_reason":   stopReason,
 		"stop_sequence": nil,
 		"usage": map[string]interface{}{

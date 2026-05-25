@@ -477,6 +477,27 @@ func (h *MessagesHandler) handleCodexStreaming(
 		return fmt.Errorf("codex API error %d: %s", resp.StatusCode, string(body))
 	}
 
+	// Send synthetic message_start with original Claude Code model name
+	// so Claude Code correctly identifies the model and its context limits.
+	msgStart, _ := json.Marshal(map[string]interface{}{
+		"type": "message_start",
+		"message": map[string]interface{}{
+			"id":      fmt.Sprintf("msg_%x", time.Now().UnixNano()),
+			"type":    "message",
+			"role":    "assistant",
+			"content": []interface{}{},
+			"model":   anthropicReq.Model,
+			"usage": map[string]interface{}{
+				"input_tokens":  0,
+				"output_tokens": 0,
+			},
+		},
+	})
+	fmt.Fprintf(w, "data: %s\n\n", string(msgStart))
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+
 	// Read SSE events and transform to Anthropic format
 	var currentEvent string
 	scanner := bufio.NewScanner(resp.Body)
@@ -771,7 +792,7 @@ func (h *MessagesHandler) executeCodexRequest(
 		return nil, fmt.Errorf("read codex stream: %w", err)
 	}
 
-	return codex.BuildCompletionResponseFromSSE(events, model.ModelID)
+	return codex.BuildCompletionResponseFromSSE(events, anthropicReq.Model)
 }
 
 // extractTextFromBlocks extracts plain text from Anthropic content blocks.
