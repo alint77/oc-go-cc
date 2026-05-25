@@ -92,6 +92,11 @@ func (r *ModelRouter) Route(messages []MessageContent, tokenCount int, requested
 	}, nil
 }
 
+// GetConfig returns the current router configuration.
+func (r *ModelRouter) GetConfig() *config.Config {
+	return r.atomic.Get()
+}
+
 // IsStreamingScenarioRoutingEnabled returns whether streaming requests should use
 // scenario-based routing instead of always routing to the fast model.
 func (r *ModelRouter) IsStreamingScenarioRoutingEnabled() bool {

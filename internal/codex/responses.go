@@ -110,7 +110,15 @@ func buildInput(messages []types.Message) (json.RawMessage, error) {
 			}
 		case "assistant":
 			textContent := extractText(blocks)
-			// Add tool calls as separate items before the assistant text
+			// Add assistant text content FIRST
+			item := map[string]interface{}{
+				"role": "assistant",
+			}
+			if textContent != "" {
+				item["content"] = textContent
+			}
+			input = append(input, item)
+			// THEN add tool calls as separate items
 			for _, b := range blocks {
 				if b.Type == "tool_use" {
 					input = append(input, map[string]interface{}{
@@ -121,14 +129,6 @@ func buildInput(messages []types.Message) (json.RawMessage, error) {
 					})
 				}
 			}
-			// Add assistant text content
-			item := map[string]interface{}{
-				"role": "assistant",
-			}
-			if textContent != "" {
-				item["content"] = textContent
-			}
-			input = append(input, item)
 		}
 	}
 	if len(input) == 0 {

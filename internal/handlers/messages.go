@@ -197,6 +197,23 @@ func (h *MessagesHandler) HandleMessages(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	// Override routing based on Claude Code's requested model name.
+	// Opus → GPT-5.5 (Codex), Sonnet/Haiku → DSV4 Flash.
+	cfg := h.modelRouter.GetConfig()
+	modelLower := strings.ToLower(requestedModel)
+	switch {
+	case strings.Contains(modelLower, "opus"):
+		if m, ok := cfg.Models["complex"]; ok {
+			routeResult.Primary = m
+			routeResult.Fallbacks = cfg.Fallbacks["complex"]
+		}
+	case strings.Contains(modelLower, "sonnet") || strings.Contains(modelLower, "haiku"):
+		if m, ok := cfg.Models["fast"]; ok {
+			routeResult.Primary = m
+			routeResult.Fallbacks = cfg.Fallbacks["fast"]
+		}
+	}
+
 	h.logger.Info("routing request",
 		"scenario", routeResult.Scenario,
 		"model", routeResult.Primary.ModelID,
