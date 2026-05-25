@@ -9,6 +9,13 @@ import (
 // Anthropic API types for the Messages API.
 // Reference: https://docs.anthropic.com/en/api/messages
 
+// ThinkingConfig represents the thinking configuration in an Anthropic request.
+// Claude Code sends this when the user selects an effort level.
+type ThinkingConfig struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
+}
+
 // MessageRequest represents a request to the Anthropic Messages API.
 type MessageRequest struct {
 	Model       string          `json:"model"`
@@ -20,6 +27,7 @@ type MessageRequest struct {
 	Temperature *float64        `json:"temperature,omitempty"`
 	TopP        *float64        `json:"top_p,omitempty"`
 	Metadata    *Metadata       `json:"metadata,omitempty"`
+	Thinking    *ThinkingConfig `json:"thinking,omitempty"`
 }
 
 // SystemText extracts the system prompt text from the raw system field.

@@ -85,28 +85,36 @@ func (t *RequestTransformer) TransformRequest(
 		openaiReq.MaxTokens = &maxTokens
 	}
 
+	// Map Claude Code's thinking config (effort per-message) to reasoning_effort.
+	hasThinkingInHistory := HasThinkingBlocks(anthropicReq.Messages)
+	thinkingEnabled := anthropicReq.Thinking != nil && anthropicReq.Thinking.Type == "enabled"
+	thinkingBudget := 0
+	if thinkingEnabled {
+		thinkingBudget = anthropicReq.Thinking.BudgetTokens
+	}
+
 	// DeepSeek-v4 models always operate in thinking mode. When conversation
 	// history contains thinking blocks (round-tripped as reasoning_content),
 	// we MUST send thinking mode params so DeepSeek validates reasoning_content
 	// on assistant messages. When history LACKS thinking blocks (Claude Code
 	// dropped them), we MUST explicitly disable thinking mode so DeepSeek
 	// doesn't require reasoning_content we can't provide.
-	hasThinkingInHistory := HasThinkingBlocks(anthropicReq.Messages)
-	if hasThinkingInHistory {
+	if hasThinkingInHistory || thinkingEnabled {
 		if len(model.Thinking) > 0 {
 			openaiReq.Thinking = model.Thinking
 		} else {
 			openaiReq.Thinking = json.RawMessage(`{"type":"enabled"}`)
 		}
-		// DeepSeek returns 400 if reasoning_effort is sent alongside
-		// thinking: disabled — only set it when thinking is active.
-		if !isThinkingDisabled(openaiReq.Thinking) || !isDeepSeekModel(model.ModelID) {
-			if model.ReasoningEffort != "" {
-				openaiReq.ReasoningEffort = &model.ReasoningEffort
-			} else {
-				defaultEffort := "high"
-				openaiReq.ReasoningEffort = &defaultEffort
-			}
+		// Map budget_tokens to reasoning_effort if provided.
+		// Claude Code sends thinking budget based on user's effort selection.
+		if model.ReasoningEffort != "" {
+			openaiReq.ReasoningEffort = &model.ReasoningEffort
+		} else if thinkingBudget > 0 {
+			effort := mapThinkingBudgetToEffort(thinkingBudget)
+			openaiReq.ReasoningEffort = &effort
+		} else if !isThinkingDisabled(openaiReq.Thinking) || !isDeepSeekModel(model.ModelID) {
+			defaultEffort := "high"
+			openaiReq.ReasoningEffort = &defaultEffort
 		}
 	} else if isDeepSeekModel(model.ModelID) || len(model.Thinking) > 0 || model.ReasoningEffort != "" {
 		// DeepSeek-v4 models default to thinking mode upstream — once
@@ -129,6 +137,23 @@ func (t *RequestTransformer) TransformRequest(
 	}
 
 	return openaiReq, nil
+}
+
+// mapThinkingBudgetToEffort maps Claude Code's thinking budget_tokens to
+// a reasoning_effort string for upstream OpenAI-compatible models.
+func mapThinkingBudgetToEffort(budget int) string {
+	switch {
+	case budget >= 24000:
+		return "xhigh"
+	case budget >= 12000:
+		return "high"
+	case budget >= 3000:
+		return "medium"
+	case budget >= 1:
+		return "low"
+	default:
+		return "high"
+	}
 }
 
 // HasThinkingBlocks returns true if any assistant message contains

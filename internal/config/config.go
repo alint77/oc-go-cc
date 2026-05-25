@@ -21,6 +21,8 @@ type Config struct {
 type ModelConfig struct {
 	Provider         string          `json:"provider"`
 	ModelID          string          `json:"model_id"`
+	BaseURL          string          `json:"base_url"`
+	CodexOAuth       bool            `json:"codex_oauth"`
 	Temperature      float64         `json:"temperature"`
 	MaxTokens        int             `json:"max_tokens"`
 	ContextThreshold int             `json:"context_threshold"`

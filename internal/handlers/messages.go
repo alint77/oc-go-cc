@@ -2,6 +2,8 @@
 package handlers
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"oc-go-cc/internal/client"
+	"oc-go-cc/internal/codex"
 	"oc-go-cc/internal/config"
 	"oc-go-cc/internal/metrics"
 	"oc-go-cc/internal/middleware"
@@ -281,6 +284,25 @@ func (h *MessagesHandler) handleStreaming(
 		// Don't use r.Context() directly - it gets canceled when Claude Code retries.
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 
+		// Check if this is a Codex OAuth model (ChatGPT subscription via Responses API)
+		if model.CodexOAuth {
+			h.logger.Info("attempting codex streaming model", "model", model.ModelID)
+			if err := h.handleCodexStreaming(ctx, rw, anthropicReq, model, clientCtx); err != nil {
+				cancel()
+				if clientCtx.Err() == context.Canceled {
+					h.logger.Info("client disconnected during codex stream")
+					return
+				}
+				h.logger.Warn("codex streaming failed", "model", model.ModelID, "error", err)
+				continue
+			}
+			cancel()
+			latency := time.Since(streamStart)
+			h.metrics.RecordSuccess(model.ModelID, latency)
+			h.logger.Info("codex streaming completed", "model", model.ModelID, "latency", latency)
+			return
+		}
+
 		// Check if this is an Anthropic-native model (MiniMax)
 		if client.IsAnthropicModel(model.ModelID) {
 			// For MiniMax models, send raw Anthropic request to Anthropic endpoint
@@ -387,6 +409,115 @@ func replaceModelInRawBody(rawBody json.RawMessage, modelID string) json.RawMess
 	return rawBody
 }
 
+// handleCodexStreaming sends a request to the Codex Responses API endpoint
+// using ChatGPT subscription OAuth credentials.
+func (h *MessagesHandler) handleCodexStreaming(
+	ctx context.Context,
+	w http.ResponseWriter,
+	anthropicReq *types.MessageRequest,
+	model config.ModelConfig,
+	clientCtx context.Context,
+) error {
+	// Get Codex OAuth credentials
+	creds, err := codex.GetCredentials()
+	if err != nil {
+		return fmt.Errorf("codex credentials: %w", err)
+	}
+
+	// Build Responses API payload
+	reqBody, err := codex.ToOpenAIResponse(anthropicReq, model)
+	if err != nil {
+		return fmt.Errorf("codex request build: %w", err)
+	}
+
+	// Determine Codex API endpoint
+	codexEndpoint := "https://chatgpt.com/backend-api/codex/responses"
+	if model.BaseURL != "" {
+		codexEndpoint = model.BaseURL
+	}
+
+	// Create HTTP request
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, codexEndpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("create codex request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+creds.AccessToken)
+	httpReq.Header.Set("Accept", "text/event-stream")
+	if creds.AccountID != "" {
+		httpReq.Header.Set("ChatGPT-Account-Id", creds.AccountID)
+	}
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("codex request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("codex API error %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Read SSE events and transform to Anthropic format
+	var currentEvent string
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		eventName, dataStr, isEvent := codex.ParseSSELine(line)
+		if !isEvent {
+			continue
+		}
+
+		if dataStr == "" && eventName != "" {
+			currentEvent = eventName
+			continue
+		}
+		if dataStr == "" {
+			continue
+		}
+
+		evtName := eventName
+		if evtName == "" {
+			evtName = currentEvent
+		}
+		currentEvent = ""
+		if evtName == "" {
+			continue
+		}
+
+		chunk, _, err := codex.BuildAnthropicChunk(evtName, []byte(dataStr))
+		if err != nil {
+			h.logger.Warn("codex event transform failed", "event", evtName, "error", err)
+			continue
+		}
+		if chunk != nil {
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", string(chunk)); err != nil {
+				return err
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+
+		if evtName == "response.completed" {
+			stopChunk, _ := json.Marshal(map[string]interface{}{
+				"type": "message_stop",
+			})
+			fmt.Fprintf(w, "data: %s\n\n", string(stopChunk))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}
+	return scanner.Err()
+}
+
 // handleAnthropicStreaming sends a raw Anthropic request to the Anthropic endpoint.
 func (h *MessagesHandler) handleAnthropicStreaming(
 	ctx context.Context,
@@ -458,6 +589,10 @@ func (h *MessagesHandler) handleNonStreaming(
 		ctx,
 		modelChain,
 		func(ctx context.Context, model config.ModelConfig) ([]byte, error) {
+			// Check if this is a Codex OAuth model
+			if model.CodexOAuth {
+				return h.executeCodexRequest(ctx, anthropicReq, model)
+			}
 			// Check if this is an Anthropic-native model (MiniMax)
 			if client.IsAnthropicModel(model.ModelID) {
 				return h.executeAnthropicRequest(ctx, rawBody, model)
@@ -536,6 +671,88 @@ func (h *MessagesHandler) executeOpenAIRequest(
 	}
 
 	return json.Marshal(anthropicResp)
+}
+
+// executeCodexRequest executes a request to the Codex Responses API using ChatGPT OAuth.
+// Codex only supports streaming, so non-streaming requests consume the full stream.
+func (h *MessagesHandler) executeCodexRequest(
+	ctx context.Context,
+	anthropicReq *types.MessageRequest,
+	model config.ModelConfig,
+) ([]byte, error) {
+	creds, err := codex.GetCredentials()
+	if err != nil {
+		return nil, fmt.Errorf("codex credentials: %w", err)
+	}
+
+	reqBody, err := codex.ToOpenAIResponse(anthropicReq, model)
+	if err != nil {
+		return nil, fmt.Errorf("build codex request: %w", err)
+	}
+
+	codexEndpoint := "https://chatgpt.com/backend-api/codex/responses"
+	if model.BaseURL != "" {
+		codexEndpoint = model.BaseURL
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, codexEndpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+creds.AccessToken)
+	httpReq.Header.Set("Accept", "text/event-stream")
+	if creds.AccountID != "" {
+		httpReq.Header.Set("ChatGPT-Account-Id", creds.AccountID)
+	}
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("codex request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("codex error %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Consume the full SSE stream
+	var events []codex.SSEEvent
+	var currentEvent string
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		eventName, dataStr, isEvent := codex.ParseSSELine(line)
+		if !isEvent {
+			continue
+		}
+		if dataStr == "" && eventName != "" {
+			currentEvent = eventName
+			continue
+		}
+		if dataStr == "" {
+			continue
+		}
+		evtName := eventName
+		if evtName == "" {
+			evtName = currentEvent
+		}
+		currentEvent = ""
+		if evtName == "" {
+			continue
+		}
+		events = append(events, codex.SSEEvent{EventType: evtName, Data: []byte(dataStr)})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read codex stream: %w", err)
+	}
+
+	return codex.BuildCompletionResponseFromSSE(events, model.ModelID)
 }
 
 // extractTextFromBlocks extracts plain text from Anthropic content blocks.
