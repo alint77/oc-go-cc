@@ -82,33 +82,53 @@ func buildInput(messages []types.Message) (json.RawMessage, error) {
 
 		switch role {
 		case "user":
-			content := extractText(blocks)
-			input = append(input, map[string]interface{}{
-				"role":    "user",
-				"content": content,
-			})
+			// Extract text and tool results from user messages
+			var textParts []string
+			for _, b := range blocks {
+				switch b.Type {
+				case "text":
+					textParts = append(textParts, b.Text)
+				case "tool_result":
+					// Add tool result as function_call_output (Responses API format)
+					toolContent := b.TextContent()
+					toolUseID := b.ToolUseID
+					tcr := map[string]interface{}{
+						"type":   "function_call_output",
+						"output": toolContent,
+					}
+					if toolUseID != "" {
+						tcr["call_id"] = toolUseID
+					}
+					input = append(input, tcr)
+				}
+			}
+			if len(textParts) > 0 {
+				input = append(input, map[string]interface{}{
+					"role":    "user",
+					"content": strings.Join(textParts, ""),
+				})
+			}
 		case "assistant":
 			textContent := extractText(blocks)
+			// Add tool calls as separate items before the assistant text
+			for _, b := range blocks {
+				if b.Type == "tool_use" {
+					input = append(input, map[string]interface{}{
+						"type":      "function_call",
+						"call_id":   b.ID,
+						"name":      b.Name,
+						"arguments": string(b.Input),
+					})
+				}
+			}
+			// Add assistant text content
 			item := map[string]interface{}{
 				"role": "assistant",
 			}
 			if textContent != "" {
 				item["content"] = textContent
 			}
-			// Check for tool calls
-			toolCalls := extractToolCalls(blocks)
-			if len(toolCalls) > 0 {
-				for _, tc := range toolCalls {
-					item["content"] = textContent + fmt.Sprintf("\n[Using tool: %s]", tc.Name)
-				}
-			}
 			input = append(input, item)
-		case "tool_result":
-			toolContent := extractText(blocks)
-			input = append(input, map[string]interface{}{
-				"type":    "tool_result",
-				"content": toolContent,
-			})
 		}
 	}
 	if len(input) == 0 {
@@ -180,12 +200,10 @@ func buildTools(anthropicTools []types.Tool) (json.RawMessage, error) {
 	var tools []map[string]interface{}
 	for _, t := range anthropicTools {
 		tools = append(tools, map[string]interface{}{
-			"type": "function",
-			"function": map[string]interface{}{
-				"name":        t.Name,
-				"description": t.Description,
-				"parameters":  t.InputSchema,
-			},
+			"type":        "function",
+			"name":        t.Name,
+			"description": t.Description,
+			"parameters":  t.InputSchema,
 		})
 	}
 	return json.Marshal(tools)
